@@ -3,6 +3,7 @@ Purpose: Daily holder behavior metrics derived from wallet state
 Model Type: Dense Continuous State
 Dependencies: daily_wallet_state.sql
 Output: Daily summary of holder counts, flows (acquired/churn), and net change
+Query Link: https://dune.com/queries/6628974
 
 Key Insight: Filters out "pure traders" (wallets never crossing threshold) 
 to focus on economically meaningful holder behavior.
