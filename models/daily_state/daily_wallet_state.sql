@@ -26,5 +26,4 @@ SELECT
     token_address,
     owner,
     CAST(eod_balance AS DOUBLE) AS eod_balance
-FROM raw_state
-WHERE eod_balance >= 0;
+FROM raw_state;
