@@ -1,0 +1,54 @@
+/*
+Purpose: derive growth metrics from daily_holder_summary in holder.state
+Model Type: State Transition Inference 
+Dependencies: holder.state.sql
+Output: Velocity and normalized velocities 
+*/
+
+WITH 
+
+velocity AS(
+    SELECT 
+        day,
+        CAST(net_change AS DOUBLE)
+            / NULLIF(CAST(holders AS DOUBLE), 0) AS holder_velocity,
+        CAST(ABS(acquired) + ABS(churn) AS DOUBLE)
+            / NULLIF(CAST(holders AS DOUBLE), 0) AS gross_holder_velocity
+    FROM state.daily_holder_summary.sql
+),
+
+velocity_normalized AS(
+    SELECT 
+        day,
+        gross_holder_velocity /
+            NULLIF(
+                APPROX_PERCENTILE(gross_holder_velocity, 0.5) OVER(
+                    ORDER BY day
+                    ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING), 0) AS gross_velo_normalized,
+        holder_velocity /
+            NULLIF(
+                APPROX_PERCENTILE(holder_velocity, 0.5) OVER(
+                    ORDER BY day
+                    ROWS BETWEEN 30 PRECEDING AND 1 PRECEDING), 0) AS velo_normalized
+    FROM velocity
+)
+
+velocity_summary AS(
+  SELECT 
+    v.day
+    v.holder_velocity,
+    v.gross_holder_velocity,
+    n.gross_velo_normalized,
+    n.velo_normalized
+  FROM velocity v
+  LEFT JOIN velocity_normalized vn 
+    ON v.day = vn.day 
+)
+
+SELECT 
+  day,
+  holder_velocity,
+  gross_holder_velocity,
+  gross_velo_normalized,
+  velo_normalized
+FROM velocity summary 
