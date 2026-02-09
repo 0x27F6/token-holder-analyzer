@@ -15,9 +15,16 @@ to focus on economically meaningful holder behavior.
 
 WITH 
 
-threshold AS (
+balance_threshold AS (
   SELECT 100 AS threshold
 ),
+
+dates AS (
+  SELECT 
+    {{d1}} AS start_date,
+    {{d2}} AS end_date
+),
+
 
 -- Current EOD balance for users that emitted events
 daily_raw_state AS (
@@ -60,7 +67,7 @@ labeled_wallet_types AS (
         ps.eod_balance,
         ps.prev_balance,
         CASE
-            WHEN wl.max_balance <= (SELECT threshold FROM params) THEN 'pure_trader'
+            WHEN wl.max_balance <= (SELECT threshold FROM balance_threshold) THEN 'pure_trader'
             ELSE 'stateful'
         END AS wallet_type
     FROM prev_state ps
@@ -75,7 +82,7 @@ stateful_wallets AS (
         owner,
         eod_balance,
         prev_balance,
-        CASE WHEN eod_balance > (SELECT threshold FROM params) THEN true ELSE false END AS is_holder
+        CASE WHEN eod_balance > (SELECT threshold FROM balance_threshold) THEN true ELSE false END AS is_holder
     FROM labeled_wallet_types
     WHERE wallet_type = 'stateful'
 ),
@@ -88,8 +95,8 @@ stateful_wallets AS (
 calendar AS (
     SELECT DATE(day) AS day
     FROM UNNEST(SEQUENCE(
-        (SELECT start_date FROM params), 
-        (SELECT end_date FROM params),
+        (SELECT start_date FROM dates), 
+        (SELECT end_date FROM dates),
         INTERVAL '1' DAY
     )) AS t(day)
 ),
@@ -110,7 +117,7 @@ holder_count AS (
               AND sw2.day <= c.day
         )
     -- Count only holders currently above threshold
-    WHERE sw.eod_balance > (SELECT threshold FROM params)
+    WHERE sw.eod_balance > (SELECT threshold FROM balance_threshold)
     GROUP BY c.day 
 ),
 
@@ -123,8 +130,8 @@ wallet_flows AS (
         -- Counts first-time holders (prev_balance IS NULL) and wallets buying back in
         SUM(
             CASE
-                WHEN (sw.prev_balance IS NULL OR sw.prev_balance <= (SELECT threshold FROM params))
-                 AND sw.eod_balance > (SELECT threshold FROM params)
+                WHEN (sw.prev_balance IS NULL OR sw.prev_balance <= ((SELECT threshold FROM balance_threshold))
+                 AND sw.eod_balance > (SELECT threshold FROM balance_threshold)
                 THEN 1 ELSE 0
             END
         ) AS acquired,
@@ -133,8 +140,8 @@ wallet_flows AS (
         -- Negative value to represent holder base contraction
         SUM(
             CASE
-                WHEN sw.prev_balance > (SELECT threshold FROM params)
-                 AND sw.eod_balance <= (SELECT threshold FROM params)
+                WHEN sw.prev_balance > (SELECT threshold FROM balance_threshold)
+                 AND sw.eod_balance <= (SELECT threshold FROM balance_threshold)
                 THEN -1 ELSE 0
             END
         ) AS churn
