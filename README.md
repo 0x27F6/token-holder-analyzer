@@ -1,11 +1,16 @@
 # token-holder-analyzer
 
-This project analyzes on-chain user behavior for tradeable tokens on the Solana network.
-Rather than relying on surface-level metrics, it models wallet behavior using first principles derived from how blockchains actually store data.
+# Advanced On-Chain Behavioral Modeling for High-Throughput Blockchains
+
+This repository implements principled, sparsity-aware models for analyzing user/wallet behavior on Solana-based tokens. It addresses core challenges in ledger data: event-driven updates, extreme sparsity, and prohibitive state reconstruction costs.
+
+The approach separates lightweight inference from precise historical state tracking, enabling accurate attribution, cohort analysis, and behavioral segmentation — techniques broadly applicable to event-sourced systems in finance, gaming, and user analytics.
+
+Built primarily on Dune Analytics using optimized SQL against compressed daily balance tables.
 
 ## Blockchain Data Primer
 
-Most blockchain dashboards use naïve aggregation strategies that work well for traditional financial datasets but break down in decentralized ledgers.
+Most blockchain dashboards use naïve aggregation strategies that break down in decentralized ledgers.
 
 Blockchain data is **event-rich but state-sparse**.
 
