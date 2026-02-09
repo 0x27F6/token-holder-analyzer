@@ -1,0 +1,146 @@
+-- Canonical daily wallet state inference
+-- Infer holder existence by tracking wallet threshold 
+-- Used downstream to derive holder metrics 
+
+WITH
+
+threshold AS(
+  SELECT 
+    100 AS threshold
+),
+
+-- current eod_balance for users that emitted an event
+daily_raw_state AS(
+  SELECT
+    day,
+    owner,
+    eod_balance
+  FROM raw_state.daily_wallet_state.sql 
+),
+
+-- previous user state. used downstream to track treshold crossing
+prev_state AS(
+    SELECT 
+        day, 
+        owner,
+        eod_balance,
+        LAG(eod_balance) OVER(PARTITION BY owner ORDER BY day) AS prev_balance
+    FROM daily_state
+),
+
+wallet_lifetime AS (
+    SELECT
+        owner,
+        MAX(eod_balance) AS max_balance
+    FROM prev_state
+    GROUP BY owner
+),
+
+-- daily_balances will include users that started the day with - balance and ended as well 
+labeled_wallet_types AS (
+    SELECT
+        ps.day,
+        ps.owner,
+        ps.eod_balance,
+        ps.prev_balance,
+        CASE
+          -- label users that never crossed threshold balance as 'pure_trader'
+            WHEN wl.max_balance <= (SELECT threshold FROM params) THEN 'pure_trader'
+            ELSE 'stateful'
+        END AS wallet_type
+    FROM prev_state ps
+    JOIN wallet_lifetime wl
+        ON ps.owner = wl.owner
+),
+
+-- boolean flag users above or below treshold 
+stateful_wallets AS(
+    SELECT 
+        day,
+        owner,
+        eod_balance,
+        prev_balance,
+        CASE WHEN eod_balance > (SELECT threshold FROM params) THEN true ELSE false END AS is_holder
+    FROM labeled_wallet_types
+    WHERE wallet_type = 'stateful'
+),
+
+
+calendar AS (
+    SELECT DATE(day) AS day
+    FROM UNNEST(SEQUENCE(
+        (SELECT start_date FROM params), 
+        (SELECT end_date FROM params),
+        INTERVAL '1' DAY
+    )) AS t(day)
+),
+
+-- count total holders 
+holder_count AS (
+    SELECT 
+        c.day,
+        COUNT(*) AS holders
+    FROM calendar c
+    JOIN stateful_wallets sw
+        -- AS OF join: Forward-fill each wallets last known balance to current calendar day
+        -- Handles sparse updates - wallets without transactions retain previous balance
+        ON sw.day = ( 
+            SELECT MAX(sw2.day)
+            FROM stateful_wallets sw2
+            WHERE sw.owner = sw2.owner 
+              AND sw2.day <= c.day
+        )
+    -- Count only economically relevant holders above threshold
+    WHERE sw.eod_balance > (SELECT threshold FROM params)
+    GROUP BY c.day 
+),
+
+-- Track daily holder acquisition and churn by detecting threshold crossings
+wallet_flows AS (
+    SELECT 
+        sw.day,
+        
+        -- Acquired: Wallets crossing above threshold (new holders or re-entries)
+        -- Counts first-time holders (prev_balance IS NULL) and wallets buying back in
+        SUM(
+            CASE
+                WHEN (sw.prev_balance IS NULL OR sw.prev_balance <= (SELECT threshold FROM params))
+                 AND sw.eod_balance > (SELECT threshold FROM params)
+                THEN 1 ELSE 0
+            END
+        ) AS acquired,
+        
+        -- Churn: Wallets crossing below threshold (exits via sell or transfer)
+        -- Negative value to represent holder base contraction
+        SUM(
+            CASE
+                WHEN sw.prev_balance > (SELECT threshold FROM params)
+                 AND sw.eod_balance <= (SELECT threshold FROM params)
+                THEN -1 ELSE 0
+            END
+        ) AS churn
+    FROM stateful_wallets sw
+    GROUP BY sw.day
+),
+
+-- summary of basic derived holder metrics 
+daily_holder_summary AS(
+    SELECT 
+        hc.day,
+        hc.holders,
+        COALESCE(wf.acquired, 0) AS acquired,
+        COALESCE(wf.churn, 0) AS churn,
+        COALESCE(wf.acquired, 0) + COALESCE(wf.churn, 0) AS net_change
+    FROM holder_count hc
+    LEFT JOIN wallet_flows wf 
+        ON hc.day = wf.day
+)
+
+SELECT 
+  day,
+  holders,
+  acquired,
+  churn,
+  net_change
+FROM daily_holder_summary 
+  
