@@ -1,3 +1,20 @@
+/*
+Purpose: Reconstruct continuous wallet holding segments from sparse transaction events
+Model Type: Dense Continuous State with Segmentation
+Dependencies: solana_utils.daily_balances
+Output: One row per wallet-day with forward-filled balances within holding segments
+
+Key Insight: Wallets enter and exit positions multiple times. Traditional AS OF joins
+incorrectly forward-fill balances across exit→re-entry boundaries. This model segments
+each wallet's timeline into discrete holding episodes to prevent false continuity.
+
+Segmentation Logic:
+1. Identify entry events (balance > 0 AND prev_balance <= 0)
+2. Assign segment IDs using cumulative sum of entry flags
+3. Bound each segment (first day, last day)
+4. Forward-fill balances only within segment boundaries
+5. Filter segments that had actual holdings (eliminate false positives)
+*/
 
 WITH 
 
