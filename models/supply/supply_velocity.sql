@@ -60,7 +60,7 @@ daily_supply_flow_metrics AS (
             4
         ) AS gross_supply_flow_7d_pct_supply                        -- 7-day velocity as % of supply
 
-    FROM daily_supply_flows f
+    FROM supply.daily_supply_flows.sql f
     CROSS JOIN (
         SELECT token_supply
         FROM total_supply
