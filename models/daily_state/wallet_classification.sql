@@ -56,7 +56,7 @@ wallet_lifetime AS (
 ),
 
 -- Label wallets as 'stateful' (meaningful holders) vs 'pure_trader' (never crossed threshold)
--- This filters noise from wallets that only trade dust amounts
+-- This filters noise from wallets that trade intra-day with a remaining balance below threshold
 labeled_wallet_types AS (
     SELECT
         ps.day,
