@@ -1,21 +1,9 @@
 /*
 Purpose: Reconstruct continuous wallet holding segments with normalized supply distribution
 Model Type: Dense Continuous State with Segmentation & Normalization
-Dependencies: solana_utils.daily_balances
+Dependencies: wallet_classification.sql (query_XXXXX)
 Output: Daily wallet balances normalized to total supply, with segment metadata
-
-Key Features:
-1. Segmentation: Tracks discrete holding episodes per wallet (entry → exit → re-entry)
-2. Normalization: Scales balances to sum to total_supply for accurate percentage calculations
-3. Deduplication: Handles overlapping segments by selecting most recent
-
-Boundary Logic: Excludes exit day (day < segment_end)
-Rationale: Once supply exits a wallet, it should not be counted in that wallet's distribution
-
-Why Normalization?
-We only track "stateful" wallets (those exceeding threshold historically). This means
-SUM(balance_filled) < total_supply. To enable accurate cohort percentage calculations,
-we scale all balances proportionally so they sum to total_supply.
+Query Link: https://dune.com/queries/XXXXXX
 
 Segmentation Algorithm:
 1. Identify entry events (balance > 0 AND prev_balance <= 0)
@@ -24,86 +12,60 @@ Segmentation Algorithm:
 4. Expand calendar only within segment boundaries
 5. Forward-fill balances using LAST_VALUE within each segment
 6. Filter to segments that had actual holdings
+7. Deduplicate overlapping segments (keep most recent)
+8. Normalize all balances to sum to total_supply
+
+Boundary Logic: Excludes exit day (day < segment_end)
+Rationale: Once supply exits a wallet, it should not be counted in that wallet's distribution.
+This version is used for supply analysis where we measure token distribution, not holder counts.
+
+Why Normalization?
+We only track "stateful" wallets (those exceeding threshold historically). This means
+SUM(balance_filled) < total_supply because we exclude dust wallets. To enable accurate
+cohort percentage calculations, we scale all balances proportionally so they sum to total_supply.
+
+Additionally, minor mass drift was observed due to previously-filtered wallets crossing the
+threshold over time. When a wallet moves from "stateless" (always below threshold) to "stateful"
+(crosses threshold for first time), its historical dust balance suddenly appears in our dataset.
+This creates apparent supply growth - in a two-month test period, approximately 40,000 tokens
+(~0.004% drift) appeared as formerly-filtered wallets exceeded the threshold.
+
+Normalization corrects both issues:
+1. Compensates for incomplete coverage (excluded dust wallets)
+2. Eliminates mass drift from wallets transitioning across the threshold boundary
+
+Formula: balance_normalized = balance_filled × (total_supply / SUM(balance_filled))
+
+This ensures supply percentages sum to exactly 100% regardless of filter-induced artifacts.
+
+Key Difference from Holder Metrics Version:
+- Excludes exit day from bounds (day < segment_end vs day <= segment_end)
+- Normalizes balances to total_supply (enables accurate supply distribution percentages)
+- Deduplicates overlapping segments (extended exit bounds can create duplicates)
 */
 
 WITH
 
+stateful_wallets AS (
+    SELECT * FROM query_XXXXX  -- Replace with actual query ID from wallet_classification
+),
+
+dates AS (
+    SELECT 
+        DATE '2024-10-18' AS start_date,
+        CURRENT_DATE AS end_date
+),
+
 params AS (
     SELECT 
-        '9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump' AS token_address,
-        DATE '2024-10-18' AS start_date,
-        CURRENT_DATE AS end_date,
-        1 AS threshold,
         1e9 AS total_supply
 ),
 
 -- ============================================================================
--- PART 1: BASE STATE & WALLET CLASSIFICATION
+-- HOLDING SEGMENT IDENTIFICATION
 -- ============================================================================
 
--- Aggregate daily balances per owner (some owners have multiple addresses)
-daily_state AS (
-    SELECT 
-        day,
-        token_balance_owner AS owner,
-        SUM(token_balance) AS eod_balance
-    FROM solana_utils.daily_balances
-    WHERE token_mint_address = (SELECT token_address FROM params)
-      AND day BETWEEN (SELECT start_date FROM params) AND (SELECT end_date FROM params)
-    GROUP BY day, token_balance_owner
-),
-
--- Add previous day's balance for transition detection
-prev_state AS (
-    SELECT 
-        day, 
-        owner,
-        eod_balance,
-        LAG(eod_balance) OVER(PARTITION BY owner ORDER BY day) AS prev_balance
-    FROM daily_state
-),
-
--- Calculate each wallet's historical peak balance
-wallet_lifetime AS (
-    SELECT
-        owner,
-        MAX(eod_balance) AS max_balance
-    FROM prev_state
-    GROUP BY owner
-),
-
--- Filter noise: Only track wallets that held meaningful positions at some point
--- "stateless" wallets never crossed threshold - exclude as dust/MEV bots
-labeled_wallet_types AS (
-    SELECT
-        ps.day,
-        ps.owner,
-        ps.eod_balance,
-        ps.prev_balance,
-        CASE
-            WHEN wl.max_balance <= 10 THEN 'stateless'
-            ELSE 'stateful'
-        END AS wallet_type
-    FROM prev_state ps
-    JOIN wallet_lifetime wl
-        ON ps.owner = wl.owner
-),
-
-stateful_wallets AS (
-    SELECT 
-        day,
-        owner,
-        eod_balance,
-        prev_balance
-    FROM labeled_wallet_types
-    WHERE wallet_type = 'stateful'
-),
-
--- ============================================================================
--- PART 2: HOLDING SEGMENT IDENTIFICATION
--- ============================================================================
-
--- Label each day's transition type and flag entries
+-- Label each day's transition type and flag entry events
 transition_labels AS (
     SELECT 
         day,
@@ -111,7 +73,7 @@ transition_labels AS (
         eod_balance,
         prev_balance,
         
-        -- Debug column for manual inspection (optional, can remove in production)
+        -- Debug column for manual inspection (optional)
         CASE 
             WHEN eod_balance > 0 AND (prev_balance <= 0 OR prev_balance IS NULL) THEN 'entry'  
             WHEN eod_balance > prev_balance THEN 'added'
@@ -121,14 +83,16 @@ transition_labels AS (
         END AS debug,
         
         -- Entry flag: Used to create segment boundaries
+        -- True when wallet moves from zero/null balance to positive balance
         CASE 
             WHEN eod_balance > 0 AND (prev_balance <= 0 OR prev_balance IS NULL) THEN true
             ELSE false
-        END as is_entry
+        END AS is_entry
     FROM stateful_wallets
 ),
 
 -- Assign segment IDs: Cumulative sum of entry flags creates holding episodes
+-- Each time a wallet enters (balance goes from 0 to >0), segment_id increments
 segment_ids AS (
     SELECT 
         day,
@@ -143,7 +107,7 @@ segment_ids AS (
     FROM transition_labels 
 ),
 
--- Identify exit days for each segment
+-- Identify exit days for each segment (balance goes to zero)
 segment_exit_days AS (
     SELECT
         owner,
@@ -155,17 +119,18 @@ segment_exit_days AS (
     GROUP BY owner, segment_id
 ),
 
--- Define segment boundaries: start = first day, end = exit day or current date
+-- Define segment boundaries
+-- If no exit found, extend to current date (wallet still holding)
 segment_bounds AS (
     SELECT 
         s.owner,
         s.segment_id,
         MIN(s.day) AS segment_start,
-        COALESCE(e.exit_day, (SELECT end_date FROM params)) AS segment_end,
+        COALESCE(e.exit_day, (SELECT end_date FROM dates)) AS segment_end,
         DATE_DIFF(
             'day',
             MIN(s.day),
-            COALESCE(e.exit_day, (SELECT end_date FROM params))
+            COALESCE(e.exit_day, (SELECT end_date FROM dates))
         ) AS segment_length_days
     FROM segment_ids s
     LEFT JOIN segment_exit_days e 
@@ -175,21 +140,21 @@ segment_bounds AS (
 ),
 
 -- ============================================================================
--- PART 3: CALENDAR EXPANSION & FORWARD-FILL
+-- CALENDAR EXPANSION & FORWARD-FILL
 -- ============================================================================
 
 -- Generate continuous calendar for the analysis period
 calendar AS (
     SELECT DATE(day) AS day
     FROM UNNEST(SEQUENCE(
-        (SELECT start_date FROM params),
-        (SELECT end_date FROM params),
+        (SELECT start_date FROM dates),
+        (SELECT end_date FROM dates),
         INTERVAL '1' DAY
     )) AS sub(day)
 ),
 
 -- Expand calendar only within each segment's boundaries
--- Note: day < segment_end (excludes exit day - supply no longer in wallet)
+-- CRITICAL: day < segment_end (excludes exit day - supply no longer in wallet)
 bounded_wallet_expansion AS (
     SELECT *
     FROM calendar c
@@ -223,6 +188,7 @@ wallet_segment_spine AS (
 ),
 
 -- Forward-fill balances within each segment using LAST_VALUE
+-- This handles sparse updates: wallets without transactions retain previous balance
 wallet_segment_spine_filled AS (
     SELECT 
         day,
@@ -240,7 +206,7 @@ wallet_segment_spine_filled AS (
 ),
 
 -- Filter to valid segments: Must have at least one non-zero balance record
--- Eliminates false segments created by data gaps
+-- Eliminates false segments created by data gaps or edge cases
 valid_segments AS (
     SELECT
         owner,
@@ -250,6 +216,7 @@ valid_segments AS (
     HAVING SUM(eod_balance) > 0
 ),
 
+-- Join back to get only valid segment data
 continuous_wallet_balance_state AS (
     SELECT 
         w.day,
@@ -267,11 +234,11 @@ continuous_wallet_balance_state AS (
 ),
 
 -- ============================================================================
--- PART 4: DEDUPLICATION & NORMALIZATION
+-- DEDUPLICATION & NORMALIZATION
 -- ============================================================================
 
 -- Handle overlapping segments: Extended exit bounds can create duplicates per wallet-day
--- Keep most recent segment (highest segment_start)
+-- Keep most recent segment (highest segment_start = most recent entry)
 wallet_day_segments AS (
     SELECT
         day,
@@ -293,6 +260,7 @@ wallet_day_segments AS (
       AND day < segment_end
 ),
 
+-- Take only the most recent segment per wallet-day (seg_rank = 1)
 daily_balance_summary AS (
     SELECT
         day,
@@ -308,6 +276,7 @@ daily_balance_summary AS (
 ),
 
 -- Calculate total filled balance per day (will be < total_supply)
+-- This is the sum of all stateful wallet balances before normalization
 daily_filled_totals AS (
     SELECT
         day,
@@ -317,6 +286,8 @@ daily_filled_totals AS (
 ),
 
 -- Compute normalization factor to scale balances to total_supply
+-- norm_factor = total_supply / filled_total
+-- This ensures SUM(balance_normalized) = total_supply for accurate percentage calculations
 daily_normalization_factor AS (
     SELECT
         f.day,
@@ -326,7 +297,8 @@ daily_normalization_factor AS (
     CROSS JOIN params p
 ),
 
--- Apply normalization: balance_normalized = balance × (total_supply / filled_total)
+-- Apply normalization: balance_normalized = balance × norm_factor
+-- This scales all balances proportionally so they sum to total_supply
 daily_balance_normalized AS (
     SELECT
         d.day,
@@ -351,9 +323,9 @@ daily_balance_normalized AS (
 SELECT
     day,
     owner,
-    eod_balance,           -- Raw balance (only present on transaction days)
-    balance_filled,        -- Forward-filled balance within segment
-    balance_normalized,    -- Scaled to ensure sum = total_supply
+    eod_balance AS raw_balance,           -- Actual balance (only present on transaction days)
+    balance_filled,                       -- Forward-filled balance within segment
+    balance_normalized,                   -- Scaled to ensure sum = total_supply
     segment_id,
     segment_start,
     segment_end,
