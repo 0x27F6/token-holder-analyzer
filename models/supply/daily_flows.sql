@@ -21,7 +21,7 @@ daily_balance_summary AS(
         segment_start,
         segment_end,
         segment_length_days
-    FROM supply_flow.continuous_wallet_balance_state.sql
+    FROM supply.continuous_wallet_balance_state.sql
     ORDER BY owner, day 
 ),
 
