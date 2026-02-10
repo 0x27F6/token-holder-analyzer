@@ -1,90 +1,26 @@
 /*
-Purpose: Daily holder behavior metrics derived from wallet state
-Model Type: Dense Continuous State
-Dependencies: daily_wallet_state.sql
-Output: Daily summary of holder counts, flows (acquired/churn), and net change
+Purpose: Calculate daily holder counts and flow dynamics (acquisition/churn)
+Model Type: Holder Flow Analysis
+Dependencies: wallet_classification.sql (query_XXXXX)
+Output: Daily holder counts, acquired wallets, churned wallets, and net change
 Query Link: https://dune.com/queries/6628974
 
-Key Insight: Filters out "pure traders" (wallets never crossing threshold) 
-to focus on economically meaningful holder behavior.
+Methodology:
+- Uses AS OF join to forward-fill wallet balances across sparse transaction days
+- Tracks threshold crossings to identify new holders (acquired) and exits (churn)
+- Net change = acquired + churn (churn is negative, so this shows holder base growth/decline)
+
+Key Metrics:
+- holders: Total wallets above threshold on each day
+- acquired: Wallets crossing from below to above threshold (entries)
+- churn: Wallets crossing from above to below threshold (exits, represented as negative)
+- net_change: Daily holder base growth (acquired - |churn|)
 */
 
--- ============================================================================
--- PARAMETERS & BASE STATE
--- ============================================================================
+WITH
 
-WITH 
-
-balance_threshold AS (
-  SELECT 100 AS threshold
-),
-
-dates AS (
-  SELECT 
-    {{d1}} AS start_date,
-    {{d2}} AS end_date
-),
-
-
--- Current EOD balance for users that emitted events
-daily_raw_state AS (
-  SELECT
-    day,
-    owner,
-    eod_balance
-  FROM raw_state.daily_wallet_state.sql 
-),
-
--- ============================================================================
--- STATE ENRICHMENT & WALLET CLASSIFICATION
--- ============================================================================
-
--- Add previous day's balance for threshold crossing detection
-prev_state AS (
-    SELECT 
-        day, 
-        owner,
-        eod_balance,
-        LAG(eod_balance) OVER(PARTITION BY owner ORDER BY day) AS prev_balance
-    FROM daily_state
-),
-
--- Determine each wallet's historical peak balance
-wallet_lifetime AS (
-    SELECT
-        owner,
-        MAX(eod_balance) AS max_balance
-    FROM prev_state
-    GROUP BY owner
-),
-
--- Label wallets as 'stateful' (meaningful holders) vs 'pure_trader' (never crossed threshold)
--- This filters noise from wallets that only trade dust amounts
-labeled_wallet_types AS (
-    SELECT
-        ps.day,
-        ps.owner,
-        ps.eod_balance,
-        ps.prev_balance,
-        CASE
-            WHEN wl.max_balance <= (SELECT threshold FROM balance_threshold) THEN 'pure_trader'
-            ELSE 'stateful'
-        END AS wallet_type
-    FROM prev_state ps
-    JOIN wallet_lifetime wl
-        ON ps.owner = wl.owner
-),
-
--- Filter to stateful wallets only - these are economically relevant holders
-stateful_wallets AS (
-    SELECT 
-        day,
-        owner,
-        eod_balance,
-        prev_balance,
-        CASE WHEN eod_balance > (SELECT threshold FROM balance_threshold) THEN true ELSE false END AS is_holder
-    FROM labeled_wallet_types
-    WHERE wallet_type = 'stateful'
+balance_threshold AS(
+  100 AS threshold
 ),
 
 -- ============================================================================
