@@ -296,8 +296,4 @@ baseline and normalized values during this period should be interpreted with cau
   from above threshold to below threshold but retains a nonzero balance is counted as churned
   for the purposes of this model.
 
----
 
-## Downstream Dependencies
-
-_To be completed._
